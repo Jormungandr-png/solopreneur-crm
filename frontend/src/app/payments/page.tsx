@@ -39,6 +39,8 @@ const STATUS_BADGE: Record<string, string> = {
 const glassCard =
   "relative overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-white/[0.11] to-white/[0.04] backdrop-blur-2xl shadow-[0_8px_32px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.22)]";
 
+const today = new Date().toISOString().split("T")[0];
+
 export default function PaymentsPage() {
   const [summary, setSummary] = useState<PaymentsSummary | null>(null);
   const [payments, setPayments] = useState<PaymentItem[]>([]);

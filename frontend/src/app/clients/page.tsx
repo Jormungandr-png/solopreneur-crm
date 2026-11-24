@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   ClientItem,
   createClient,
+  deleteClient,
   fetchClients,
   grantClientReward,
   redeemClientReward,
@@ -15,6 +16,7 @@ import {
   Plus,
   Search,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -45,7 +47,7 @@ export default function ClientsPage() {
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
 
-  // Add Client form state
+  // Add Client form state (niche is overridden by the backend using the logged-in coach's profile)
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -107,6 +109,23 @@ export default function ClientsPage() {
     }
   }
 
+  async function handleRemove(client: ClientItem) {
+    if (!window.confirm(`Remove ${client.name} from your clients? This cannot be undone.`)) {
+      return;
+    }
+
+    setBusyId(client.id);
+    setError(null);
+    try {
+      await deleteClient(client.id);
+      setClients((prev) => prev.filter((c) => c.id !== client.id));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not remove client");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function handleCreateClient(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -161,7 +180,7 @@ export default function ClientsPage() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by client name, email, or niche..."
+            placeholder="Search by client name or email..."
             className="w-full rounded-xl border border-white/10 bg-white/[0.06] py-2 pl-10 pr-4 text-sm text-white placeholder-slate-400 outline-none transition focus:border-cyan-400/50 focus:bg-white/[0.1]"
           />
         </div>
@@ -189,12 +208,26 @@ export default function ClientsPage() {
         </div>
       )}
 
-      {/* Clients List */}
+      {/* Clients List or Empty State */}
       {loading ? (
         <div className="space-y-4 animate-pulse">
           {[1, 2, 3].map((i) => (
             <div key={i} className="h-44 rounded-2xl bg-white/[0.06]" />
           ))}
+        </div>
+      ) : visibleClients.length === 0 ? (
+        <div className={`${glassCard} p-12 text-center`}>
+          <h3 className="text-lg font-bold text-white">No clients yet</h3>
+          <p className="mt-1 text-sm text-slate-400">
+            Add your first coaching client to start tracking churn risk and loyalty rewards.
+          </p>
+          <button
+            onClick={() => setShowModal(true)}
+            className="mt-4 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-cyan-500 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:brightness-110"
+          >
+            <Plus className="h-4 w-4" />
+            Add Your First Client
+          </button>
         </div>
       ) : (
         <div className="space-y-5">
@@ -247,6 +280,16 @@ export default function ClientsPage() {
                       className="rounded-xl border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.14] disabled:opacity-40"
                     >
                       Redeem -50
+                    </button>
+                    <button
+                      onClick={() => handleRemove(client)}
+                      disabled={busyId === client.id}
+                      aria-label={`Remove ${client.name}`}
+                      title="Remove client"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {busyId === client.id ? "Removing..." : "Remove"}
                     </button>
                   </div>
                 </div>
@@ -321,16 +364,7 @@ export default function ClientsPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <select
-                  value={form.niche}
-                  onChange={(e) => setForm({ ...form, niche: e.target.value })}
-                  className="rounded-xl border border-white/15 bg-[#121a2e] px-3 py-2 text-white outline-none"
-                >
-                  <option value="fitness">Fitness</option>
-                  <option value="gaming">Gaming</option>
-                  <option value="creator_training">Creator Training</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
                 <select
                   value={form.plan_tier}
                   onChange={(e) => setForm({ ...form, plan_tier: e.target.value })}

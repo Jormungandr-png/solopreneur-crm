@@ -1,4 +1,15 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { supabase } from "@/lib/supabase";
+
+const API_BASE = "";
+
+async function authHeaders(): Promise<HeadersInit> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 export interface RiskFactor {
   feature: string;
@@ -53,76 +64,6 @@ export interface AnalyticsOverview {
   }[];
 }
 
-export async function fetchAnalyticsOverview(): Promise<AnalyticsOverview> {
-  const res = await fetch(`${API_BASE}/api/analytics/overview`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to load analytics overview");
-  return res.json();
-}
-
-export async function fetchClients(riskLevel?: string): Promise<ClientItem[]> {
-  const url = riskLevel
-    ? `${API_BASE}/api/clients?risk_level=${riskLevel}`
-    : `${API_BASE}/api/clients`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to load clients");
-  return res.json();
-}
-
-export async function grantClientReward(
-  clientId: number,
-  points: number,
-  rewardName: string
-): Promise<ClientItem> {
-  const res = await fetch(`${API_BASE}/api/clients/${clientId}/rewards/grant`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ points, reward_name: rewardName }),
-  });
-  if (!res.ok) throw new Error("Failed to grant reward");
-  return res.json();
-}
-
-export async function createClient(payload: {
-  name: string;
-  email: string;
-  niche: string;
-  plan_tier: string;
-  monthly_fee: number;
-  tenure_months: number;
-  sessions_attended_30d: number;
-  sessions_missed_30d: number;
-  days_since_last_checkin: number;
-  avg_reply_hours: number;
-  sentiment_score: number;
-  late_payments_90d: number;
-  reward_points: number;
-}): Promise<ClientItem> {
-  const res = await fetch(`${API_BASE}/api/clients`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error("Failed to create client");
-  return res.json();
-}
-
-export async function redeemClientReward(
-  clientId: number,
-  points: number,
-  rewardName: string
-): Promise<ClientItem> {
-  const res = await fetch(`${API_BASE}/api/clients/${clientId}/rewards/redeem`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ points, reward_name: rewardName }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || "Failed to redeem reward");
-  }
-  return res.json();
-}
-
 export interface PaymentItem {
   id: number;
   client_id: number;
@@ -146,17 +87,128 @@ export interface PaymentsSummary {
   overdue_count: number;
 }
 
+export interface InboxMessageInput {
+  sender_name: string;
+  channel: string;
+  body: string;
+}
+
+export interface PrioritizedMessage {
+  id?: number;
+  created_at?: string | null;
+  sender_name: string;
+  channel: string;
+  body: string;
+  urgency: "urgent" | "medium" | "low";
+  urgency_score: number;
+  sentiment: "negative" | "neutral" | "positive";
+  suggested_reply: string;
+}
+
+export async function fetchAnalyticsOverview(): Promise<AnalyticsOverview> {
+  const res = await fetch(`${API_BASE}/api/analytics/overview`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load analytics overview");
+  return res.json();
+}
+
+export async function fetchClients(riskLevel?: string): Promise<ClientItem[]> {
+  const url = riskLevel
+    ? `${API_BASE}/api/clients?risk_level=${riskLevel}`
+    : `${API_BASE}/api/clients`;
+  const res = await fetch(url, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load clients");
+  return res.json();
+}
+
+export async function createClient(payload: {
+  name: string;
+  email: string;
+  niche: string;
+  plan_tier: string;
+  monthly_fee: number;
+  tenure_months: number;
+  sessions_attended_30d: number;
+  sessions_missed_30d: number;
+  days_since_last_checkin: number;
+  avg_reply_hours: number;
+  sentiment_score: number;
+  late_payments_90d: number;
+  reward_points: number;
+}): Promise<ClientItem> {
+  const res = await fetch(`${API_BASE}/api/clients`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error("Failed to create client");
+  return res.json();
+}
+
+export async function deleteClient(clientId: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/clients/${clientId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to remove client");
+  }
+}
+
+export async function grantClientReward(
+  clientId: number,
+  points: number,
+  rewardName: string
+): Promise<ClientItem> {
+  const res = await fetch(`${API_BASE}/api/clients/${clientId}/rewards/grant`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ points, reward_name: rewardName }),
+  });
+  if (!res.ok) throw new Error("Failed to grant reward");
+  return res.json();
+}
+
+export async function redeemClientReward(
+  clientId: number,
+  points: number,
+  rewardName: string
+): Promise<ClientItem> {
+  const res = await fetch(`${API_BASE}/api/clients/${clientId}/rewards/redeem`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ points, reward_name: rewardName }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to redeem reward");
+  }
+  return res.json();
+}
+
 export async function fetchPayments(status?: string): Promise<PaymentItem[]> {
   const url = status
     ? `${API_BASE}/api/payments?status=${status}`
     : `${API_BASE}/api/payments`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error("Failed to load payments");
   return res.json();
 }
 
 export async function fetchPaymentsSummary(): Promise<PaymentsSummary> {
-  const res = await fetch(`${API_BASE}/api/payments/summary`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}/api/payments/summary`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error("Failed to load payment summary");
   return res.json();
 }
@@ -173,28 +225,20 @@ export async function createPayment(payload: {
 }): Promise<PaymentItem> {
   const res = await fetch(`${API_BASE}/api/payments`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error("Failed to log payment");
   return res.json();
 }
 
-
-export interface InboxMessageInput {
-  sender_name: string;
-  channel: string;
-  body: string;
-}
-
-export interface PrioritizedMessage {
-  sender_name: string;
-  channel: string;
-  body: string;
-  urgency: "urgent" | "medium" | "low";
-  urgency_score: number;
-  sentiment: "negative" | "neutral" | "positive";
-  suggested_reply: string;
+export async function fetchInbox(): Promise<PrioritizedMessage[]> {
+  const res = await fetch(`${API_BASE}/api/inbox`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load inbox");
+  return res.json();
 }
 
 export async function prioritizeInbox(
@@ -202,7 +246,7 @@ export async function prioritizeInbox(
 ): Promise<PrioritizedMessage[]> {
   const res = await fetch(`${API_BASE}/api/inbox/prioritize`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify(messages),
   });
   if (!res.ok) throw new Error("Failed to prioritize inbox");

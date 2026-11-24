@@ -1,19 +1,22 @@
 import os
 from typing import Any, Dict, List, Optional
-
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import (
+    supabase,
     fetch_all_clients,
     fetch_client_by_id,
+    delete_client,
     fetch_payments,
     insert_client,
     insert_payment,
     update_client_rewards,
+    fetch_messages,
+    insert_message
 )
 from app.ml.churn_model import DATA_PATH, predict_client_churn, train_and_save_model
-from app.ml.generate_data import generate_training_csv, seed_supabase_demo_data
+from app.ml.generate_data import generate_training_csv
 from app.ml.inbox_scorer import prioritize_messages
 from app.models import (
     ChurnFeaturesInput,
@@ -44,9 +47,27 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event() -> None:
+    # Ensure ML training CSV exists, but do NOT auto-seed demo clients
     if not DATA_PATH.exists():
         generate_training_csv(DATA_PATH)
-    seed_supabase_demo_data()
+
+
+def get_current_coach(authorization: Optional[str] = Header(None)) -> Dict[str, str]:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+    token = authorization.replace("Bearer ", "").strip()
+    try:
+        user_res = supabase.auth.get_user(token)
+        user = user_res.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        meta = user.user_metadata or {}
+        return {
+            "id": user.id,
+            "niche": meta.get("niche", "fitness"),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Auth error: {exc}") from exc
 
 
 def _enrich_client(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -63,18 +84,24 @@ def health_check() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-# 1. Business Analytics Dashboard
+# 1. Business Analytics Dashboard (Scoped to Logged-in Coach)
 @app.get("/api/analytics/overview")
-def get_analytics_overview() -> Dict[str, Any]:
-    clients = [_enrich_client(c) for c in fetch_all_clients()]
-    payments = fetch_payments()
+def get_analytics_overview(
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    clients = [_enrich_client(c) for c in fetch_all_clients(coach["id"])]
+    payments = fetch_payments(coach["id"])
 
     active_clients = [c for c in clients if c["status"] != "churned"]
     high_risk = [c for c in active_clients if c["churn_prediction"]["risk_level"] == "High"]
     mrr = round(sum(float(c["monthly_fee"]) for c in active_clients), 2)
     at_risk_mrr = round(sum(float(c["monthly_fee"]) for c in high_risk), 2)
     avg_churn_prob = (
-        round(sum(c["churn_prediction"]["churn_probability"] for c in active_clients) / len(active_clients), 4)
+        round(
+            sum(c["churn_prediction"]["churn_probability"] for c in active_clients)
+            / len(active_clients),
+            4,
+        )
         if active_clients
         else 0.0
     )
@@ -123,10 +150,13 @@ def get_analytics_overview() -> Dict[str, Any]:
     }
 
 
-# 2. Clients, Churn Analysis & Rewards
+# 2. Clients, Churn Analysis & Rewards (Scoped + Niche-Locked)
 @app.get("/api/clients", response_model=List[ClientOut])
-def list_clients(risk_level: Optional[str] = Query(None)) -> List[Dict[str, Any]]:
-    clients = [_enrich_client(c) for c in fetch_all_clients()]
+def list_clients(
+    risk_level: Optional[str] = Query(None),
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> List[Dict[str, Any]]:
+    clients = [_enrich_client(c) for c in fetch_all_clients(coach["id"])]
     if risk_level:
         clients = [c for c in clients if c["churn_prediction"]["risk_level"] == risk_level]
     clients.sort(key=lambda c: c["churn_prediction"]["churn_probability"], reverse=True)
@@ -134,16 +164,41 @@ def list_clients(risk_level: Optional[str] = Query(None)) -> List[Dict[str, Any]
 
 
 @app.post("/api/clients", response_model=ClientOut, status_code=201)
-def create_client(payload: ClientCreate) -> Dict[str, Any]:
+def create_client(
+    payload: ClientCreate,
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    data = payload.model_dump()
+    data["niche"] = coach["niche"]  # Lock client niche to the logged-in coach's niche
     try:
-        raw = insert_client(payload.model_dump())
+        raw = insert_client(data, coach["id"])
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not create client: {exc}") from exc
     return _enrich_client(raw)
 
 
+@app.delete("/api/clients/{client_id}", status_code=204)
+def remove_client(
+    client_id: int,
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> None:
+    try:
+        deleted = delete_client(client_id, coach["id"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not remove client: {exc}") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+
 @app.post("/api/clients/{client_id}/rewards/grant", response_model=ClientOut)
-def grant_reward_points(client_id: int, action: RewardAction) -> Dict[str, Any]:
+def grant_reward_points(
+    client_id: int,
+    action: RewardAction,
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    existing = fetch_client_by_id(client_id, coach["id"])
+    if not existing:
+        raise HTTPException(status_code=404, detail="Client not found")
     updated = update_client_rewards(client_id, action.points, "retention_bonus", action.reward_name)
     if not updated:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -151,8 +206,12 @@ def grant_reward_points(client_id: int, action: RewardAction) -> Dict[str, Any]:
 
 
 @app.post("/api/clients/{client_id}/rewards/redeem", response_model=ClientOut)
-def redeem_reward_points(client_id: int, action: RewardAction) -> Dict[str, Any]:
-    existing = fetch_client_by_id(client_id)
+def redeem_reward_points(
+    client_id: int,
+    action: RewardAction,
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    existing = fetch_client_by_id(client_id, coach["id"])
     if not existing:
         raise HTTPException(status_code=404, detail="Client not found")
     if existing["reward_points"] < action.points:
@@ -161,23 +220,31 @@ def redeem_reward_points(client_id: int, action: RewardAction) -> Dict[str, Any]
     return _enrich_client(updated)
 
 
-# 3. Payments & Finances
+# 3. Payments & Finances (Scoped to Logged-in Coach)
 @app.get("/api/payments", response_model=List[PaymentOut])
-def list_payments(status: Optional[str] = Query(None)) -> List[Dict[str, Any]]:
-    return fetch_payments(status=status)
+def list_payments(
+    status: Optional[str] = Query(None),
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> List[Dict[str, Any]]:
+    return fetch_payments(coach["id"], status=status)
 
 
 @app.post("/api/payments", response_model=PaymentOut, status_code=201)
-def log_payment(payload: PaymentCreate) -> Dict[str, Any]:
-    if not fetch_client_by_id(payload.client_id):
+def log_payment(
+    payload: PaymentCreate,
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    if not fetch_client_by_id(payload.client_id, coach["id"]):
         raise HTTPException(status_code=404, detail="Client not found")
-    return insert_payment(payload.model_dump())
+    return insert_payment(payload.model_dump(), coach["id"])
 
 
 @app.get("/api/payments/summary")
-def get_payments_summary() -> Dict[str, Any]:
-    payments = fetch_payments()
-    clients = [_enrich_client(c) for c in fetch_all_clients()]
+def get_payments_summary(
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
+    payments = fetch_payments(coach["id"])
+    clients = [_enrich_client(c) for c in fetch_all_clients(coach["id"])]
 
     paid = round(sum(float(p["amount"]) for p in payments if p["status"] == "paid"), 2)
     pending = round(sum(float(p["amount"]) for p in payments if p["status"] == "pending"), 2)
@@ -203,18 +270,36 @@ def get_payments_summary() -> Dict[str, Any]:
 
 # 4. ML & AI Inbox
 @app.post("/api/ml/predict-churn", response_model=ChurnPrediction)
-def predict_single_churn(features: ChurnFeaturesInput) -> Dict[str, Any]:
+def predict_single_churn(
+    features: ChurnFeaturesInput,
+    _coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
     return predict_client_churn(features.model_dump())
 
 
 @app.post("/api/ml/retrain")
-def retrain_churn_model() -> Dict[str, Any]:
+def retrain_churn_model(
+    _coach: Dict[str, str] = Depends(get_current_coach),
+) -> Dict[str, Any]:
     if not DATA_PATH.exists():
         generate_training_csv(DATA_PATH)
     artifact = train_and_save_model(DATA_PATH)
     return {"status": "retrained", "metrics": artifact["metrics"]}
 
 
+@app.get("/api/inbox", response_model=List[PrioritizedMessage])
+def get_saved_inbox(
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> List[Dict[str, Any]]:
+    return fetch_messages(coach["id"])
+
+
 @app.post("/api/inbox/prioritize", response_model=List[PrioritizedMessage])
-def prioritize_inbox(messages: List[InboxMessageInput]) -> List[Dict[str, Any]]:
-    return prioritize_messages([m.model_dump() for m in messages])
+def prioritize_inbox(
+    messages: List[InboxMessageInput],
+    coach: Dict[str, str] = Depends(get_current_coach),
+) -> List[Dict[str, Any]]:
+    scored = prioritize_messages([m.model_dump() for m in messages])
+    for item in scored:
+        insert_message(item, coach["id"])
+    return fetch_messages(coach["id"])

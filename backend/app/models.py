@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,8 @@ class InboxMessageInput(BaseModel):
 
 
 class PrioritizedMessage(BaseModel):
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
     sender_name: str
     channel: str
     body: str
